@@ -27,7 +27,7 @@ if (-not (Get-Command $PythonBin -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-$PyMajMin = & $PythonBin -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")'
+$PyMajMin = & $PythonBin -c "import sys; print(str(sys.version_info.major) + chr(46) + str(sys.version_info.minor))"
 if ($PyMajMin -ne '3.12' -and $PyMajMin -ne '3.13') {
     $PyPath = (Get-Command $PythonBin).Source
     Write-Error "Python 3.12 or 3.13 required, found $PyMajMin at $PyPath. Activate a venv built with python3.12 or python3.13 and retry."
@@ -51,11 +51,11 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
 # Install dograh API requirements first so pipecat's extras win on any
 # shared transitive dependencies (matches api/Dockerfile and CI workflow).
 Write-Host "Installing dograh API requirements..."
-uv pip install -r api/requirements.txt
+uv pip install --python "$BaseDir\venv\Scripts\python.exe" -r api/requirements.txt
 
 if ($Dev) {
     Write-Host "Installing dograh API dev requirements..."
-    uv pip install -r api/requirements.dev.txt
+    uv pip install --python "$BaseDir\venv\Scripts\python.exe" -r api/requirements.dev.txt
 }
 
 # Install pipecat in editable mode with all extras
@@ -67,6 +67,6 @@ if ($Dev) {
     # override pipecat's protobuf version constraint.
     $PipecatInstallArgs += @('--group', 'pipecat/pyproject.toml:dev')
 }
-uv pip install @PipecatInstallArgs
+uv pip install --python "$BaseDir\venv\Scripts\python.exe" @PipecatInstallArgs
 
 Write-Host "Setup complete! Requirements are installed."
