@@ -1,0 +1,220 @@
+---
+title: "Future AGI Integration"
+description: "Score every completed Dograh call with Future AGI evaluation templates"
+---
+
+## Overview
+
+The Future AGI integration node runs [Future AGI](https://futureagi.com) evaluations against every completed call. When the conversation ends, Dograh builds a transcript from the call and submits it to the evaluation templates you name on the node. The scores land on the workflow run alongside your other post-call annotations.
+
+The evaluation is **post-call and bring-your-own-key**: while the call is live, Dograh only records the conversation locally. Nothing is sent to Future AGI and no latency is added to the conversation. Evaluations run in the background after the call finishes, using the credentials you configure on the node.
+
+<Note>
+This integration talks to the Future AGI REST API directly and adds no new Python dependency to Dograh. Future AGI's `ai-evaluation` SDK is deliberately not used: it pins `openai<2` while Dograh runs openai 2.x, and it binds credentials to a class attribute, which would leak keys between organizations evaluating calls at the same time.
+</Note>
+
+## Prerequisites
+
+- A [Future AGI account](https://app.futureagi.com) with an API key and secret key
+- At least one evaluation available in your Future AGI workspace
+- A Dograh voice agent workflow
+
+## Setup
+
+### 1. Get your Future AGI credentials
+
+Log in to [app.futureagi.com](https://app.futureagi.com) and open **Developer → Keys**. Copy both values:
+
+| Credential | Where to find it |
+|---|---|
+| **API Key** | Developer → Keys → **API Key** |
+| **Secret Key** | Developer → Keys → **Secret Key** |
+
+Both are required. Future AGI authenticates with the pair, not with either one alone.
+
+### 2. Choose your evaluations
+
+Decide which evaluations should run against each call. You can use:
+
+- **Built-in templates**, for example `Tone` or `Toxicity`
+- **Custom evaluations** you created under **Evaluations** in the Future AGI dashboard
+
+Name them on the node as a comma-separated list, exactly as they appear in Future AGI:
+
+```
+Tone, Toxicity, my_custom_qa_check
+```
+
+<Warning>
+Each evaluation in the list is a separate billed API call per completed call. Three evaluations on a workflow handling 1,000 calls a day is 3,000 evaluations a day. Start with one or two.
+</Warning>
+
+### 3. Add the node to your workflow
+
+1. Open your workflow in the Dograh editor
+2. Click **Add Node** and choose **Future AGI** under Integrations
+3. Fill in the API key, secret key, and your evaluation list
+4. Click **Save**
+
+The node is configuration-only. Leave it unconnected: it does not participate in the conversation graph and has no incoming or outgoing edges.
+
+## Configuration
+
+| Field | Required | Default | Description |
+|---|---|---|---|
+| **Enabled** | — | `true` | Turn the integration off without deleting the node |
+| **Future AGI API Key** | Yes | — | API key from Developer → Keys |
+| **Future AGI Secret Key** | Yes | — | Secret key from Developer → Keys |
+| **Evaluations** | Yes | — | Comma-separated evaluation names |
+| **Dataset name** | No | — | File each call as a row in this Future AGI dataset so results appear in their dashboard. Created on first use |
+| **Evaluation model** | No | — | `TURING_LARGE`, `TURING_SMALL`, `TURING_FLASH`, `PROTECT`, or `PROTECT_FLASH`. Leave blank to use the evaluation's own configured model |
+| **API base URL** | No | `https://api.futureagi.com` | Override only for a regional or self-hosted deployment |
+| **Timeout (seconds)** | No | `60` | Per-evaluation timeout |
+
+## What gets evaluated
+
+Dograh builds several views of the conversation:
+
+| Key | Contents |
+|---|---|
+| `input` / `query` / `question` | Everything the caller said |
+| `output` / `response` / `answer` | Everything the agent said |
+| `context` / `prompt` / `system_prompt` | The system prompt in effect during the call |
+| `text` / `conversation` / `transcript` | The full readable transcript |
+
+<Warning>
+Future AGI's API **rejects any input key an evaluation does not declare**. Sending `input`, `output` and `context` to an evaluation that only accepts `output` returns a 400, not a tolerated extra.
+</Warning>
+
+So Dograh does not send all of these. Before evaluating, it reads your account's evaluation catalogue from `GET /sdk/api/v1/get-evals/` and narrows the inputs to exactly the keys that evaluation declares, resolving aliases where the names differ (an evaluation wanting `generated_transcript` is given the transcript). The catalogue is fetched once per set of credentials and cached.
+
+If the catalogue can't be read, Dograh sends the inputs unfiltered and lets the API return its own validation error rather than silently sending nothing.
+
+System prompts are sent as `context` only. They are kept out of the transcript so a conversation-level evaluation does not grade your own prompt as if the agent had spoken it.
+
+### Audio-level evaluations
+
+A few evaluations score the audio rather than the transcript: `dead_air_detection` and `audio_quality` want `input_audio`, `ASR/STT_accuracy` wants `audio` plus the transcript. These are the ones Tuner and Noveum cannot replicate from text alone.
+
+Future AGI fetches media **by URL**, so Dograh passes the call's public recording URL. Two conditions:
+
+1. The run produced a recording. If not, the evaluation is reported as `missing_input: input_audio` and no billed call is made.
+2. **Future AGI's servers can reach the URL.** On a local install pointing at `localhost` they cannot, so audio evaluations only work on a deployed Dograh with a publicly reachable `BACKEND_API_ENDPOINT`.
+
+### Evaluations that can never run from a call
+
+Anything needing ground truth — `accuracy`, `f1_score`, `answer_similarity`, the `reference`/`hypothesis` family — requires an expected answer that a live call does not have. Dograh detects this before calling and reports `missing_input: expected` rather than paying for a guaranteed failure.
+
+### Checking what your evaluations need
+
+To see the catalogue your account exposes and whether Dograh can satisfy each evaluation:
+
+```bash
+FI_API_KEY=... FI_SECRET_KEY=... python -m scripts.futureagi_evals
+```
+
+Pass names to check only those:
+
+```bash
+FI_API_KEY=... FI_SECRET_KEY=... python -m scripts.futureagi_evals tone toxicity
+```
+
+It flags names that don't exist on your account and any evaluation whose required inputs Dograh cannot supply from a voice call.
+
+Very long calls are truncated to the last 100,000 characters, keeping the end of the call where the outcome, objection handling and close live. When that happens the run is annotated with `transcript_truncated: true`.
+
+## Where results appear
+
+This matters, because the two places show different things.
+
+### In Dograh (always)
+
+Scores are written to the workflow run's annotations. Open the run in Dograh and the annotations panel shows one entry per Future AGI node. This happens whether or not you set a dataset name.
+
+### In the Future AGI dashboard (only with a dataset name)
+
+Future AGI's evaluation endpoint is **stateless**: it scores what you send and returns a number, storing nothing against your account. If you leave **Dataset name** blank, your scores are correct but your Future AGI dashboard stays empty, which is expected and not a misconfiguration.
+
+Set **Dataset name** to make calls visible there. Each completed call is filed as a row with these columns:
+
+| Column | Contents |
+|---|---|
+| `workflow_run_id` | The Dograh run, so you can trace a row back |
+| `agent_version` | Workflow version that handled the call |
+| `call_disposition` | How the call ended |
+| `input` / `output` | Caller turns and agent turns |
+| `transcript` | Full readable transcript |
+| `context` | System prompt in effect |
+| `eval_scores` | Flattened scores from the evaluations that ran |
+
+The dataset is created on first use, so just pick a name like `dograh-calls`. From there you can add more evaluations to the dataset inside Future AGI and re-run them over your call history.
+
+<Note>
+Cells are capped at 65,535 characters by Future AGI. Longer transcripts are truncated from the front, keeping the end of the call.
+</Note>
+
+Filing a row never affects your scores: it runs after the evaluations, and a dataset failure is reported under `dataset` without downgrading an otherwise successful run.
+
+## Results
+
+Each completed call is annotated with one entry per Future AGI node:
+
+```json
+{
+  "futureagi_<node_id>": {
+    "status": "evaluated",
+    "evaluations": {
+      "Tone": { "metrics": { "Tone": "positive", "reason": "warm and helpful" } },
+      "Toxicity": { "metrics": { "Toxicity": 0.02 } }
+    },
+    "evals_succeeded": 2,
+    "evals_failed": 0,
+    "turns_evaluated": 14,
+    "transcript_truncated": false,
+    "evaluated_at": "2026-09-12T11:04:00+00:00",
+    "dataset": {
+      "status": "row_added",
+      "dataset_name": "dograh-calls",
+      "dataset_id": "..."
+    }
+  }
+}
+```
+
+The `dataset` block is present only when you set a dataset name.
+
+One evaluation failing never discards the others. Each is reported on its own:
+
+| Value | Meaning |
+|---|---|
+| `status: evaluated` | At least one evaluation returned a score |
+| `status: all_evals_failed` | Every evaluation failed; check `evaluations` for why |
+| `status: no_transcript` | The run produced no conversation, for example a call that never connected |
+| `error: invalid_credentials` | Future AGI rejected the API key and secret pair |
+| `error: timeout` | The evaluation exceeded the configured timeout |
+| `error: no_metrics_returned` | The call succeeded but returned no score |
+| `error: unknown_eval: '<name>'` | That evaluation does not exist on your account. No billed call was made |
+| `error: missing_input: <keys>` | The evaluation needs inputs this call cannot supply, such as audio or ground truth. No billed call was made |
+| `error: HTTP <code>: <body>` | The API rejected the request; the body is its own explanation |
+
+## Troubleshooting
+
+**Every evaluation returns `invalid_credentials`.** Check that you copied both the API key and the secret key, and that they come from the same workspace.
+
+**One evaluation returns `no_metrics_returned` while others work.** The name almost certainly does not match. Evaluation names are case-sensitive and must match the Future AGI dashboard exactly.
+
+**Nothing is annotated at all.** Confirm the node is enabled and saved, and that the call actually produced a conversation. Runs that fail before the pipeline starts are reported as `no_transcript`.
+
+**Scores appear in Dograh but the Future AGI dashboard is empty.** Expected when **Dataset name** is blank. The evaluation endpoint stores nothing on its own. Set a dataset name and run another call.
+
+**`dataset.status` is `failed`.** Your scores are still valid; only the dashboard copy failed. The `error` field says why. `invalid_credentials` means the key pair was rejected, anything else is passed through from their API.
+
+## Comparison with other integrations
+
+Dograh already exports calls to [Tuner](/integrations/tuner) and [Noveum](/integrations/noveum). All three are post-call, and they overlap:
+
+- **Tuner** exports transcripts, outcomes and cost, and can place simulated SIP calls into your agent
+- **Noveum** exports full traces with per-turn STT, LLM and TTS spans plus call audio
+- **Future AGI** scores the transcript against a library of evaluation templates
+
+Future AGI is the right choice when you want a broad set of prebuilt scoring templates applied to the transcript. It does not replace Noveum's span-level tracing or Tuner's simulation.
