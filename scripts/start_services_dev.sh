@@ -22,6 +22,7 @@ LOG_TO_FILE=${LOG_TO_FILE:-true}
 HEALTH_CHECK_ENDPOINT="/api/v1/health"
 HEALTH_MAX_ATTEMPTS=${HEALTH_MAX_ATTEMPTS:-30}
 HEALTH_INTERVAL=${HEALTH_INTERVAL:-2}
+HEALTH_TIMEOUT=${HEALTH_TIMEOUT:-10}
 
 cd "$BASE_DIR"
 echo "Starting Dograh Services (DEV MODE) at $(date) in BASE_DIR: ${BASE_DIR}"
@@ -205,7 +206,7 @@ echo "Waiting for uvicorn health check at http://127.0.0.1:${UVICORN_BASE_PORT}$
 
 healthy=false
 for ((attempt = 1; attempt <= HEALTH_MAX_ATTEMPTS; attempt++)); do
-  http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+  http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time "$HEALTH_TIMEOUT" \
     "http://127.0.0.1:${UVICORN_BASE_PORT}${HEALTH_CHECK_ENDPOINT}" 2>/dev/null || echo "000")
 
   if [[ "$http_code" == "200" ]]; then

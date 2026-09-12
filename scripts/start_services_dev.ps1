@@ -52,6 +52,7 @@ if (-not $env:UVICORN_BASE_PORT)   { $env:UVICORN_BASE_PORT = '8000' }
 $HealthEndpoint    = '/api/v1/health'
 $HealthMaxAttempts = if ($env:HEALTH_MAX_ATTEMPTS) { [int]$env:HEALTH_MAX_ATTEMPTS } else { 30 }
 $HealthInterval    = if ($env:HEALTH_INTERVAL)     { [int]$env:HEALTH_INTERVAL }     else { 2 }
+$HealthTimeout     = if ($env:HEALTH_TIMEOUT)      { [int]$env:HEALTH_TIMEOUT }      else { 10 }
 
 ###############################################################################
 ### 2) Define services
@@ -106,6 +107,13 @@ foreach ($spec in $serviceSpecs) {
 
 if (-not $NoMigrations) {
     alembic -c (Join-Path $BaseDir 'api/alembic.ini') upgrade head
+    # $ErrorActionPreference does not apply to native executables, so check the
+    # exit code explicitly rather than starting services against an unmigrated DB.
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "FAIL Database migrations failed (exit $LASTEXITCODE). Services not started."
+        Write-Host "     Is Postgres reachable? Check: docker compose -f docker-compose-local.yaml ps"
+        exit 1
+    }
 }
 
 ###############################################################################
@@ -143,7 +151,7 @@ Write-Host "Waiting for uvicorn health check at $healthUrl ..."
 $healthy = $false
 for ($attempt = 1; $attempt -le $HealthMaxAttempts; $attempt++) {
     try {
-        $resp = Invoke-WebRequest -Uri $healthUrl -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
+        $resp = Invoke-WebRequest -Uri $healthUrl -UseBasicParsing -TimeoutSec $HealthTimeout -ErrorAction Stop
         if ($resp.StatusCode -eq 200) {
             Write-Host "OK uvicorn healthy (attempt $attempt)"
             $healthy = $true
